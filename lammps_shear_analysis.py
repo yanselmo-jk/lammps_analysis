@@ -13,6 +13,7 @@ import csv
 import math
 import sys
 from dataclasses import dataclass
+from multiprocessing import cpu_count, get_context
 from pathlib import Path
 from typing import Iterable, Iterator, List, Optional, Sequence, Tuple
 
@@ -156,10 +157,7 @@ def compute_angles(H: Mat3) -> Tuple[float, float, float]:
 
 
 def matmul(A: Mat3, B: Mat3) -> Mat3:
-    return [
-        [sum(A[i][k] * B[k][j] for k in range(3)) for j in range(3)]
-        for i in range(3)
-    ]
+    return [[sum(A[i][k] * B[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
 
 
 def transpose(A: Mat3) -> Mat3:
@@ -261,12 +259,58 @@ def unwrap_basis_sequence(
     return cont, picked
 
 
+def _build_row(frame: FrameBox, H: Mat3, M: IntMat3, H_ref: Mat3) -> dict:
+    alpha, beta, gamma = compute_angles(H)
+    E = finite_strain(H, H_ref)
+    a, b, c = col(H, 0), col(H, 1), col(H, 2)
+    return {
+        "timestep": frame.timestep,
+        "lx": H[0][0],
+        "ly": H[1][1],
+        "lz": H[2][2],
+        "a_norm": norm(a),
+        "b_norm": norm(b),
+        "c_norm": norm(c),
+        "xy_tilt": H[0][1],
+        "xz_tilt": H[0][2],
+        "yz_tilt": H[1][2],
+        "alpha_deg": alpha,
+        "beta_deg": beta,
+        "gamma_deg": gamma,
+        "eng_shear_xy": H[0][1] / H[1][1],
+        "eng_shear_xz": H[0][2] / H[2][2],
+        "eng_shear_yz": H[1][2] / H[2][2],
+        "E_xx": E[0][0],
+        "E_yy": E[1][1],
+        "E_zz": E[2][2],
+        "E_xy": E[0][1],
+        "E_xz": E[0][2],
+        "E_yz": E[1][2],
+        "M00": M[0][0],
+        "M01": M[0][1],
+        "M02": M[0][2],
+        "M10": M[1][0],
+        "M11": M[1][1],
+        "M12": M[1][2],
+        "M20": M[2][0],
+        "M21": M[2][1],
+        "M22": M[2][2],
+    }
+
+
+def _build_row_task(args: Tuple[FrameBox, Mat3, IntMat3, Mat3]) -> dict:
+    frame, H, M, H_ref = args
+    return _build_row(frame, H, M, H_ref)
+
+
 def analyze(
     frames: Sequence[FrameBox],
     unwrap_basis: bool = True,
     max_abs_matrix: int = 1,
     progress: bool = False,
     progress_frames_step: int = 1000,
+    processes: int = 1,
+    mp_chunksize: int = 200,
 ) -> List[dict]:
     H_raw = [f.h_matrix() for f in frames]
     if unwrap_basis:
@@ -283,49 +327,27 @@ def analyze(
         return []
 
     H_ref = H_used[0]
-    rows = []
     total = len(H_used)
-    for i, (frame, H, M) in enumerate(zip(frames, H_used, transforms)):
-        alpha, beta, gamma = compute_angles(H)
-        E = finite_strain(H, H_ref)
-        a, b, c = col(H, 0), col(H, 1), col(H, 2)
-        rows.append(
-            {
-                "timestep": frame.timestep,
-                "lx": H[0][0],
-                "ly": H[1][1],
-                "lz": H[2][2],
-                "a_norm": norm(a),
-                "b_norm": norm(b),
-                "c_norm": norm(c),
-                "xy_tilt": H[0][1],
-                "xz_tilt": H[0][2],
-                "yz_tilt": H[1][2],
-                "alpha_deg": alpha,
-                "beta_deg": beta,
-                "gamma_deg": gamma,
-                "eng_shear_xy": H[0][1] / H[1][1],
-                "eng_shear_xz": H[0][2] / H[2][2],
-                "eng_shear_yz": H[1][2] / H[2][2],
-                "E_xx": E[0][0],
-                "E_yy": E[1][1],
-                "E_zz": E[2][2],
-                "E_xy": E[0][1],
-                "E_xz": E[0][2],
-                "E_yz": E[1][2],
-                "M00": M[0][0],
-                "M01": M[0][1],
-                "M02": M[0][2],
-                "M10": M[1][0],
-                "M11": M[1][1],
-                "M12": M[1][2],
-                "M20": M[2][0],
-                "M21": M[2][1],
-                "M22": M[2][2],
-            }
-        )
-        if progress and ((i + 1) % progress_frames_step == 0 or i == total - 1):
-            _print_progress("analyze", i + 1, total)
+    tasks = list(zip(frames, H_used, transforms, [H_ref] * total))
+
+    workers = cpu_count() if processes <= 0 else processes
+    chunksize = max(1, mp_chunksize)
+
+    if workers <= 1 or total < 2:
+        rows = []
+        for i, task in enumerate(tasks):
+            rows.append(_build_row_task(task))
+            if progress and ((i + 1) % progress_frames_step == 0 or i == total - 1):
+                _print_progress("analyze", i + 1, total)
+        return rows
+
+    rows = []
+    ctx = get_context("spawn")
+    with ctx.Pool(processes=workers) as pool:
+        for i, row in enumerate(pool.imap(_build_row_task, tasks, chunksize=chunksize), start=1):
+            rows.append(row)
+            if progress and (i % progress_frames_step == 0 or i == total):
+                _print_progress("analyze", i, total)
     return rows
 
 
@@ -357,6 +379,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Progress print interval for unwrapping/analyze (frames)",
     )
     p.add_argument(
+        "--processes",
+        type=int,
+        default=1,
+        help="Worker processes for analysis only (1=off, 0=cpu_count)",
+    )
+    p.add_argument(
+        "--mp-chunksize",
+        type=int,
+        default=200,
+        help="Task chunksize used by multiprocessing worker map",
+    )
+    p.add_argument(
         "--matrix-max-abs",
         type=int,
         default=1,
@@ -380,6 +414,8 @@ def main() -> None:
         max_abs_matrix=args.matrix_max_abs,
         progress=args.progress,
         progress_frames_step=max(1, args.progress_frames_step),
+        processes=args.processes,
+        mp_chunksize=max(1, args.mp_chunksize),
     )
     write_csv(rows, args.output)
     print(f"Parsed {len(frames)} frames; wrote {args.output}")

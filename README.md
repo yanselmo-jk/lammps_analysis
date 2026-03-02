@@ -23,6 +23,8 @@ Options:
 - `--progress`: show read/unwrap/analyze progress in stderr for large files
 - `--progress-bytes-step-mb N`: read progress print interval in MB (`default=50`)
 - `--progress-frames-step N`: unwrap/analyze progress print interval in frames (`default=1000`)
+- `--processes N`: multiprocessing worker count for analysis only (`1` disables, `0` uses CPU core count)
+- `--mp-chunksize N`: chunksize for multiprocessing task dispatch (`default=200`)
 
 ## Output columns
 
@@ -38,3 +40,9 @@ Options:
 
 - Triclinic parsing follows LAMMPS `BOX BOUNDS xy xz yz` semantics.
 - For robust strain tracking when box basis is redefined, keep unwrapping enabled.
+
+
+## Multiprocessing note
+
+- Multiprocessing is applied only to per-frame analysis row generation (not file I/O parsing).
+- Basis unwrapping remains sequential because each frame depends on the previous unwrapped frame.
