@@ -20,7 +20,7 @@ Options:
 
 - `--no-unwrap`: disable basis continuity correction
 - `--matrix-max-abs N`: integer matrix search bound for unwrapping (`default=1`, increase to `2` if needed)
-- `--progress`: show read/unwrap/analyze progress in stderr for large files
+- `--progress`: show read/unwrap/analyze progress in stderr for large files (with elapsed HH:MM:SS)
 - `--progress-bytes-step-mb N`: read progress print interval in MB (`default=50`)
 - `--progress-frames-step N`: unwrap/analyze progress print interval in frames (`default=1000`)
 - `--processes N`: multiprocessing worker count for analysis only (`1` disables, `0` uses CPU core count)

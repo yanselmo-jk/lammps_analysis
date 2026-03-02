@@ -12,6 +12,7 @@ import argparse
 import csv
 import math
 import sys
+import time
 from dataclasses import dataclass
 from multiprocessing import cpu_count, get_context
 from pathlib import Path
@@ -46,11 +47,22 @@ class FrameBox:
         ]
 
 
-def _print_progress(stage: str, current: int, total: int) -> None:
+def _format_elapsed(elapsed_s: float) -> str:
+    """Format elapsed seconds as HH:MM:SS."""
+    total_seconds = max(0, int(elapsed_s))
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def _print_progress(stage: str, current: int, total: int, start_time: Optional[float] = None) -> None:
+    """Print progress percentage and elapsed wall-clock time for a stage."""
     if total <= 0:
         return
     pct = (100.0 * current) / total
-    print(f"[{stage}] {pct:6.2f}% ({current}/{total})", file=sys.stderr)
+    elapsed = _format_elapsed(time.perf_counter() - start_time) if start_time is not None else "--:--:--"
+    print(f"[{stage}] {pct:6.2f}% ({current}/{total}) elapsed {elapsed}", file=sys.stderr)
 
 
 def parse_dump_boxes(
@@ -62,6 +74,7 @@ def parse_dump_boxes(
     frames: List[FrameBox] = []
     total_size = path.stat().st_size
     next_progress = progress_bytes_step
+    stage_start = time.perf_counter()
 
     with path.open("r", encoding="utf-8") as f:
         while True:
@@ -70,7 +83,7 @@ def parse_dump_boxes(
                 break
 
             if progress and total_size > 0 and f.tell() >= next_progress:
-                _print_progress("read", min(f.tell(), total_size), total_size)
+                _print_progress("read", min(f.tell(), total_size), total_size, stage_start)
                 next_progress += progress_bytes_step
 
             if not line.startswith("ITEM: TIMESTEP"):
@@ -125,7 +138,7 @@ def parse_dump_boxes(
             )
 
     if progress:
-        _print_progress("read", total_size, total_size)
+        _print_progress("read", total_size, total_size, stage_start)
     return frames
 
 
@@ -231,11 +244,13 @@ def unwrap_basis_sequence(
 ) -> Tuple[List[Mat3], List[IntMat3]]:
     if not H_list:
         return [], []
+    # Candidate integer transforms representing equivalent lattice bases.
     candidates = build_integer_matrices(max_abs=max_abs)
     cont = [H_list[0]]
     picked = [[[1, 0, 0], [0, 1, 0], [0, 0, 1]]]
 
     total = len(H_list)
+    stage_start = time.perf_counter()
     for t in range(1, total):
         H = H_list[t]
         prev = cont[-1]
@@ -254,7 +269,7 @@ def unwrap_basis_sequence(
         cont.append(best_H)
 
         if progress and (t % progress_frames_step == 0 or t == total - 1):
-            _print_progress("unwrap", t + 1, total)
+            _print_progress("unwrap", t + 1, total, stage_start)
 
     return cont, picked
 
@@ -329,25 +344,29 @@ def analyze(
     H_ref = H_used[0]
     total = len(H_used)
     tasks = list(zip(frames, H_used, transforms, [H_ref] * total))
+    # Measure elapsed analysis time independently from I/O and unwrapping.
+    stage_start = time.perf_counter()
 
     workers = cpu_count() if processes <= 0 else processes
     chunksize = max(1, mp_chunksize)
 
+    # Serial fallback for small workloads or when multiprocessing is disabled.
     if workers <= 1 or total < 2:
         rows = []
         for i, task in enumerate(tasks):
             rows.append(_build_row_task(task))
             if progress and ((i + 1) % progress_frames_step == 0 or i == total - 1):
-                _print_progress("analyze", i + 1, total)
+                _print_progress("analyze", i + 1, total, stage_start)
         return rows
 
     rows = []
+    # Parallelize only per-frame row construction (I/O remains single-process).
     ctx = get_context("spawn")
     with ctx.Pool(processes=workers) as pool:
         for i, row in enumerate(pool.imap(_build_row_task, tasks, chunksize=chunksize), start=1):
             rows.append(row)
             if progress and (i % progress_frames_step == 0 or i == total):
-                _print_progress("analyze", i, total)
+                _print_progress("analyze", i, total, stage_start)
     return rows
 
 
@@ -399,8 +418,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
-
-
 def _print_selected_options(args: argparse.Namespace) -> None:
     """Print selected CLI options so users can verify runtime configuration."""
     options = {
@@ -417,6 +434,7 @@ def _print_selected_options(args: argparse.Namespace) -> None:
     print("Selected options:")
     for key, value in options.items():
         print(f"  - {key}: {value}")
+
 
 def main() -> None:
     args = build_arg_parser().parse_args()
