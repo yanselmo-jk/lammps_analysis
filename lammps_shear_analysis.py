@@ -399,8 +399,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
+
+
+def _print_selected_options(args: argparse.Namespace) -> None:
+    """Print selected CLI options so users can verify runtime configuration."""
+    options = {
+        "dump": str(args.dump),
+        "output": str(args.output),
+        "no_unwrap": args.no_unwrap,
+        "progress": args.progress,
+        "progress_bytes_step_mb": args.progress_bytes_step_mb,
+        "progress_frames_step": args.progress_frames_step,
+        "processes": args.processes,
+        "mp_chunksize": args.mp_chunksize,
+        "matrix_max_abs": args.matrix_max_abs,
+    }
+    print("Selected options:")
+    for key, value in options.items():
+        print(f"  - {key}: {value}")
+
 def main() -> None:
     args = build_arg_parser().parse_args()
+    _print_selected_options(args)
     frames = parse_dump_boxes(
         args.dump,
         progress=args.progress,
