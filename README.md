@@ -6,8 +6,9 @@
 - box angles (`alpha`, `beta`, `gamma`)
 - engineering shear proxies (`xy/Ly`, `xz/Lz`, `yz/Lz`)
 - Green-Lagrange strain components (`E_xy`, `E_xz`, `E_yz`, etc.)
+- applied integer basis transform `M` per timestep when unwrapping is enabled
 
-It also supports **basis jump unwrapping** to handle equivalent box redefinitions done during simulation.
+It supports **basis jump unwrapping** to handle equivalent box redefinitions done during simulation.
 
 ## Usage
 
@@ -19,6 +20,16 @@ Options:
 
 - `--no-unwrap`: disable basis continuity correction
 - `--matrix-max-abs N`: integer matrix search bound for unwrapping (`default=1`, increase to `2` if needed)
+
+## Output columns
+
+- `lx`, `ly`, `lz`: LAMMPS restricted triclinic box lengths
+- `a_norm`, `b_norm`, `c_norm`: Cartesian lengths of the basis vectors
+- `xy_tilt`, `xz_tilt`, `yz_tilt`: tilt factors
+- `alpha_deg`, `beta_deg`, `gamma_deg`
+- `eng_shear_xy`, `eng_shear_xz`, `eng_shear_yz`
+- `E_xx`, `E_yy`, `E_zz`, `E_xy`, `E_xz`, `E_yz`
+- `M00..M22`: selected integer basis transform for each frame
 
 ## Notes
 

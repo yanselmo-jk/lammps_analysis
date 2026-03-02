@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Analyze LAMMPS dump box deformation and compute shear-related metrics."""
+"""Analyze LAMMPS dump box deformation and compute shear-related metrics.
+
+This script parses ``ITEM: BOX BOUNDS`` blocks from a LAMMPS dump and computes
+angle/shear/strain metrics per timestep. It also provides optional integer-basis
+continuity unwrapping to handle equivalent box redefinitions during runs.
+"""
 
 from __future__ import annotations
 
@@ -40,6 +45,7 @@ class FrameBox:
 
 
 def parse_dump_boxes(path: Path) -> List[FrameBox]:
+    """Parse timestep + box metadata from a LAMMPS dump file."""
     frames: List[FrameBox] = []
     with path.open("r", encoding="utf-8") as f:
         lines = iter(f)
@@ -166,6 +172,7 @@ def finite_strain(H: Mat3, H_ref: Mat3) -> Mat3:
 
 
 def build_integer_matrices(max_abs: int = 1) -> List[IntMat3]:
+    """Enumerate small integer 3x3 matrices with determinant +/- 1."""
     mats: List[IntMat3] = []
     vals = range(-max_abs, max_abs + 1)
     for entries in _product(vals, repeat=9):
@@ -233,9 +240,14 @@ def analyze(frames: Sequence[FrameBox], unwrap_basis: bool = True, max_abs_matri
         rows.append(
             {
                 "timestep": frame.timestep,
-                "lx": norm(a),
-                "ly": norm(b),
-                "lz": norm(c),
+                # LAMMPS lengths from restricted triclinic representation.
+                "lx": H[0][0],
+                "ly": H[1][1],
+                "lz": H[2][2],
+                # Actual vector norms in Cartesian space.
+                "a_norm": norm(a),
+                "b_norm": norm(b),
+                "c_norm": norm(c),
                 "xy_tilt": H[0][1],
                 "xz_tilt": H[0][2],
                 "yz_tilt": H[1][2],
@@ -279,7 +291,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("dump", type=Path)
     p.add_argument("-o", "--output", type=Path, default=Path("shear_analysis.csv"))
     p.add_argument("--no-unwrap", action="store_true")
-    p.add_argument("--matrix-max-abs", type=int, default=1)
+    p.add_argument(
+        "--matrix-max-abs",
+        type=int,
+        default=1,
+        help="GL(3,Z) search range for unwrapping; 1 is faster, 2 is broader",
+    )
     return p
 
 
