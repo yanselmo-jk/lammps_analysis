@@ -11,9 +11,10 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, List, Sequence, Tuple
+from typing import Iterable, Iterator, List, Optional, Sequence, Tuple
 
 Vec3 = Tuple[float, float, float]
 Mat3 = List[List[float]]
@@ -44,31 +45,57 @@ class FrameBox:
         ]
 
 
-def parse_dump_boxes(path: Path) -> List[FrameBox]:
+def _print_progress(stage: str, current: int, total: int) -> None:
+    if total <= 0:
+        return
+    pct = (100.0 * current) / total
+    print(f"[{stage}] {pct:6.2f}% ({current}/{total})", file=sys.stderr)
+
+
+def parse_dump_boxes(
+    path: Path,
+    progress: bool = False,
+    progress_bytes_step: int = 50 * 1024 * 1024,
+) -> List[FrameBox]:
     """Parse timestep + box metadata from a LAMMPS dump file."""
     frames: List[FrameBox] = []
+    total_size = path.stat().st_size
+    next_progress = progress_bytes_step
+
     with path.open("r", encoding="utf-8") as f:
-        lines = iter(f)
-        for line in lines:
+        while True:
+            line = f.readline()
+            if not line:
+                break
+
+            if progress and total_size > 0 and f.tell() >= next_progress:
+                _print_progress("read", min(f.tell(), total_size), total_size)
+                next_progress += progress_bytes_step
+
             if not line.startswith("ITEM: TIMESTEP"):
                 continue
-            timestep_line = next(lines, None)
-            if timestep_line is None:
+
+            timestep_line = f.readline()
+            if not timestep_line:
                 break
             timestep = int(timestep_line.strip())
 
-            for line in lines:
+            box_header = None
+            while True:
+                line = f.readline()
+                if not line:
+                    break
                 if line.startswith("ITEM: BOX BOUNDS"):
                     box_header = line.strip().split()
                     break
-            else:
+            if box_header is None:
                 break
 
-            triclinic = {"xy", "xz", "yz"}.issubset(set(box_header[3:]))
-            row1 = _parse_float_row(next(lines))
-            row2 = _parse_float_row(next(lines))
-            row3 = _parse_float_row(next(lines))
+            row1 = _parse_float_row(f.readline())
+            row2 = _parse_float_row(f.readline())
+            row3 = _parse_float_row(f.readline())
 
+            triclinic = {"xy", "xz", "yz"}.issubset(set(box_header[3:]))
             if triclinic:
                 xlo_b, xhi_b, xy = row1[:3]
                 ylo_b, yhi_b, xz = row2[:3]
@@ -95,6 +122,9 @@ def parse_dump_boxes(path: Path) -> List[FrameBox]:
             frames.append(
                 FrameBox(timestep, lx, ly, lz, xy, xz, yz, xlo, xhi, ylo, yhi, zlo, zhi)
             )
+
+    if progress:
+        _print_progress("read", total_size, total_size)
     return frames
 
 
@@ -195,18 +225,24 @@ def matmul_int(A: Mat3, M: IntMat3) -> Mat3:
     return [[sum(A[i][k] * float(M[k][j]) for k in range(3)) for j in range(3)] for i in range(3)]
 
 
-def unwrap_basis_sequence(H_list: Sequence[Mat3], max_abs: int = 1) -> Tuple[List[Mat3], List[IntMat3]]:
+def unwrap_basis_sequence(
+    H_list: Sequence[Mat3],
+    max_abs: int = 1,
+    progress: bool = False,
+    progress_frames_step: int = 1000,
+) -> Tuple[List[Mat3], List[IntMat3]]:
     if not H_list:
         return [], []
     candidates = build_integer_matrices(max_abs=max_abs)
     cont = [H_list[0]]
     picked = [[[1, 0, 0], [0, 1, 0], [0, 0, 1]]]
 
-    for t in range(1, len(H_list)):
+    total = len(H_list)
+    for t in range(1, total):
         H = H_list[t]
         prev = cont[-1]
-        best_M = None
-        best_H = None
+        best_M: Optional[IntMat3] = None
+        best_H: Optional[Mat3] = None
         best_score = float("inf")
         for M in candidates:
             HM = matmul_int(H, M)
@@ -218,13 +254,28 @@ def unwrap_basis_sequence(H_list: Sequence[Mat3], max_abs: int = 1) -> Tuple[Lis
         assert best_M is not None and best_H is not None
         picked.append(best_M)
         cont.append(best_H)
+
+        if progress and (t % progress_frames_step == 0 or t == total - 1):
+            _print_progress("unwrap", t + 1, total)
+
     return cont, picked
 
 
-def analyze(frames: Sequence[FrameBox], unwrap_basis: bool = True, max_abs_matrix: int = 1) -> List[dict]:
+def analyze(
+    frames: Sequence[FrameBox],
+    unwrap_basis: bool = True,
+    max_abs_matrix: int = 1,
+    progress: bool = False,
+    progress_frames_step: int = 1000,
+) -> List[dict]:
     H_raw = [f.h_matrix() for f in frames]
     if unwrap_basis:
-        H_used, transforms = unwrap_basis_sequence(H_raw, max_abs=max_abs_matrix)
+        H_used, transforms = unwrap_basis_sequence(
+            H_raw,
+            max_abs=max_abs_matrix,
+            progress=progress,
+            progress_frames_step=progress_frames_step,
+        )
     else:
         H_used = H_raw
         transforms = [[[1, 0, 0], [0, 1, 0], [0, 0, 1]] for _ in H_raw]
@@ -233,18 +284,17 @@ def analyze(frames: Sequence[FrameBox], unwrap_basis: bool = True, max_abs_matri
 
     H_ref = H_used[0]
     rows = []
-    for frame, H, M in zip(frames, H_used, transforms):
+    total = len(H_used)
+    for i, (frame, H, M) in enumerate(zip(frames, H_used, transforms)):
         alpha, beta, gamma = compute_angles(H)
         E = finite_strain(H, H_ref)
         a, b, c = col(H, 0), col(H, 1), col(H, 2)
         rows.append(
             {
                 "timestep": frame.timestep,
-                # LAMMPS lengths from restricted triclinic representation.
                 "lx": H[0][0],
                 "ly": H[1][1],
                 "lz": H[2][2],
-                # Actual vector norms in Cartesian space.
                 "a_norm": norm(a),
                 "b_norm": norm(b),
                 "c_norm": norm(c),
@@ -274,6 +324,8 @@ def analyze(frames: Sequence[FrameBox], unwrap_basis: bool = True, max_abs_matri
                 "M22": M[2][2],
             }
         )
+        if progress and ((i + 1) % progress_frames_step == 0 or i == total - 1):
+            _print_progress("analyze", i + 1, total)
     return rows
 
 
@@ -291,6 +343,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("dump", type=Path)
     p.add_argument("-o", "--output", type=Path, default=Path("shear_analysis.csv"))
     p.add_argument("--no-unwrap", action="store_true")
+    p.add_argument("--progress", action="store_true", help="Show file I/O and analysis progress")
+    p.add_argument(
+        "--progress-bytes-step-mb",
+        type=int,
+        default=50,
+        help="Progress print interval for file reading (MB)",
+    )
+    p.add_argument(
+        "--progress-frames-step",
+        type=int,
+        default=1000,
+        help="Progress print interval for unwrapping/analyze (frames)",
+    )
     p.add_argument(
         "--matrix-max-abs",
         type=int,
@@ -302,10 +367,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
-    frames = parse_dump_boxes(args.dump)
+    frames = parse_dump_boxes(
+        args.dump,
+        progress=args.progress,
+        progress_bytes_step=max(1, args.progress_bytes_step_mb) * 1024 * 1024,
+    )
     if not frames:
         raise SystemExit("No frames parsed from dump")
-    rows = analyze(frames, unwrap_basis=(not args.no_unwrap), max_abs_matrix=args.matrix_max_abs)
+    rows = analyze(
+        frames,
+        unwrap_basis=(not args.no_unwrap),
+        max_abs_matrix=args.matrix_max_abs,
+        progress=args.progress,
+        progress_frames_step=max(1, args.progress_frames_step),
+    )
     write_csv(rows, args.output)
     print(f"Parsed {len(frames)} frames; wrote {args.output}")
 

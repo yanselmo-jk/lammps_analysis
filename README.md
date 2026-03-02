@@ -13,13 +13,16 @@ It supports **basis jump unwrapping** to handle equivalent box redefinitions don
 ## Usage
 
 ```bash
-python lammps_shear_analysis.py dump.atom -o shear_analysis.csv
+python lammps_shear_analysis.py dump.atom -o shear_analysis.csv --progress
 ```
 
 Options:
 
 - `--no-unwrap`: disable basis continuity correction
 - `--matrix-max-abs N`: integer matrix search bound for unwrapping (`default=1`, increase to `2` if needed)
+- `--progress`: show read/unwrap/analyze progress in stderr for large files
+- `--progress-bytes-step-mb N`: read progress print interval in MB (`default=50`)
+- `--progress-frames-step N`: unwrap/analyze progress print interval in frames (`default=1000`)
 
 ## Output columns
 
